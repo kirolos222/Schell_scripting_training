@@ -1,0 +1,13 @@
+
+    * Automated RC Filter Test
+    V1 in 0 AC 1
+    R1 in out 1000
+    C1 out 0 100n
+    .ac dec 20 1 100k
+    .control
+        run
+        wrdata output.txt v(out)
+        quit
+    .endc
+    .end
+    

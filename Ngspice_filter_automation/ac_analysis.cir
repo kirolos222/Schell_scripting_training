@@ -1,0 +1,13 @@
+
+    * Automated Filter Optimization
+    V1 in 0 AC 1
+    R1 in out 9010.0
+    C1 out 0 1.0000000000000002e-14
+    .ac dec 20 1 200G
+    .control
+        run
+        wrdata output.txt v(out)
+        quit
+    .endc
+    .end
+    

@@ -55,4 +55,3 @@ python test.py
 
 The script runs a simulation at a current value, then runs a second "nudge" simulation to determine the slope (). It uses this slope to "jump" to the next best guess. If it hits the resistor limit, it automatically scales the capacitor value and resets the search to ensure a valid layout-friendly solution.
 
-**Would you like me to add a "How to Contribute" or a "Troubleshooting" section to this README?**

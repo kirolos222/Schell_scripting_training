@@ -1,4 +1,4 @@
-# Schell_scripting_training
+# Filter_optimizer
 
 ## **High-Frequency RC Filter Optimizer**
 

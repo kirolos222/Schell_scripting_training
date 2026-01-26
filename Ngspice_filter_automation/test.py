@@ -1,17 +1,14 @@
 import subprocess
 import os
 import random
-TARGET_FREQ = 8 *1e9  # The frequency we want to achieve
-TOLERANCE = 0.01*TARGET_FREQ     # How close is "good enough" (in Hz)
-resistor = 1000.0     # Starting guess (1k Ohm)
-cap= 1 / (2 * 3.14 * resistor * TARGET_FREQ)
+import tkinter as tk
+from tkinter import ttk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
 
-if cap < 10e-15:
-    cap =100*1e-15
-elif cap >1e-6:
-    cap =100*1e-9
-def run_simulation(r_val,C_VAL):
-    # The 'r' before the string handles the Windows path backslashes
+# --- 1. CORE SIMULATION FUNCTIONS (Keep these global) ---
+def run_simulation(r_val, C_VAL):
     spice_path = r"d:\Spice64\bin\ngspice.exe" 
     
     netlist = f"""
@@ -42,69 +39,152 @@ def get_actual_cutoff():
             try:
                 freq = float(parts[0])
                 voltage = float(parts[1])
-                # 0.707 is the standard -3dB cutoff point
                 if voltage <= 0.707:
                     return freq
             except ValueError:
                 continue
     return 0
 
-# --- THE LAYOUT-CONSTRAINED NEWTON LOOP ---
-MIN_CAP = 50e-15 # 50fF Limit
-# --- THE OPTIMIZATION LOOP ---
-print(f"Targeting Cutoff: {TARGET_FREQ/1e9} GHz")
-history = []
-MAX_RES = 100000.0      # 100k Layout Limit
-MIN_RES = 10.0
-for attempt in range(50):
-    # 1. LOOP DETECTION
-    state = (round(resistor, 2), round(cap * 1e15, 2))
-    if state in history:
-        print("⚠️ Infinite loop detected. Jittering resistor...")
-        resistor *= random.uniform(0.8, 1.2)
-        history.clear()
-        continue
-    history.append(state)
+# --- 2. GUI CLASS ---
+class FilterTunerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Newton-Raphson RC Tuner")
+        
+        # --- UI Layout ---
+        self.setup_widgets()
+        
+        # --- Matplotlib Setup ---
+        self.fig, self.ax = plt.subplots(figsize=(6, 4))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+    def setup_widgets(self):
+        control_frame = ttk.Frame(self.root, padding="10")
+        control_frame.pack(side=tk.LEFT, fill=tk.Y)
+        
+        ttk.Label(control_frame, text="Target Freq (GHz):").pack()
+        self.target_entry = ttk.Entry(control_frame)
+        self.target_entry.insert(0, "5") # Default 5 GHz
+        self.target_entry.pack(pady=5)
+        
+        self.status_label = ttk.Label(control_frame, text="Status: Idle", foreground="blue")
+        self.status_label.pack(pady=20)
+        
+        self.tune_btn = ttk.Button(control_frame, text="Start Auto-Tune", command=self.start_optimization)
+        self.tune_btn.pack(pady=10)
+        
+        self.stats_text = tk.Text(control_frame, height=15, width=40)
+        self.stats_text.pack(pady=10)
 
-    # 2. MEASURE CURRENT STATE
-    run_simulation(resistor, cap)
-    f1 = get_actual_cutoff()
-    error = f1 - TARGET_FREQ
-    
-    print(f"Step {attempt}: R={resistor:.2f}Ω | C={cap*1e15:.2f}fF | Freq={f1/1e9:.2f}GHz")
+    def update_plot(self, r, c, current_f, target_f):
+        self.ax.clear()
+        
+        # Simulate a theoretical curve for visualization
+        f_range = np.logspace(0, 11, 100) # 1Hz to 100GHz
+        gain = 1 / np.sqrt(1 + (2 * np.pi * f_range * r * c)**2)
+        
+        self.ax.semilogx(f_range, gain, label=f"R={r:.1f}Ω, C={c*1e15:.1f}fF")
+        self.ax.axvline(x=current_f, color='blue', linestyle='--', label=f'Current: {current_f/1e9:.2f}G')
+        self.ax.axvline(x=target_f, color='red', label=f'Target: {target_f/1e9:.2f}G')
+        self.ax.axhline(y=0.707, color='green', linestyle=':')
+        
+        self.ax.set_ylim(0, 1.1)
+        self.ax.set_title("Filter Magnitude Response")
+        self.ax.legend()
+        self.canvas.draw()
 
-    if abs(error) <= TOLERANCE:
-        print(f"✅ Success! R: {resistor:.2f}Ω, C: {cap*1e15:.2f}fF")
-        break
+    def start_optimization(self):
+        # --- GET USER INPUT ---
+        try:
+            target_input = float(self.target_entry.get())
+            TARGET_FREQ = target_input * 1e9 # Convert GHz to Hz
+        except ValueError:
+            self.status_label.config(text="Error: Invalid Number", foreground="red")
+            return
 
-    # 3. CALCULATE SLOPE WITH RELATIVE NUDGE
-    nudge = resistor * 0.05 
-    run_simulation(resistor + nudge, cap)
-    f2 = get_actual_cutoff()
-    slope = (f2 - f1) / nudge
+        # --- INITIALIZATION ---
+        TOLERANCE = 0.01 * TARGET_FREQ
+        resistor = 1000.0
+        # Calculate initial Cap guess based on target
+        cap = 1 / (2 * 3.14 * resistor * TARGET_FREQ)
+        
+        if cap < 10e-15: cap = 10e-15
+        elif cap > 1e-6: cap = 100e-9
 
-    # 4. EMERGENCY SLOPE RECOVERY (The "Dead Zone" Fix)
-    if abs(slope) < 1e-5:
-        print("⚠️ Zero slope. Directional kick...")
-        if f1 < TARGET_FREQ:
-            resistor *= 0.5  # Need higher freq? Drop R
-        else:
-            resistor *= 2.0  # Need lower freq? Raise R
-        continue
+        # Constraints
+        MIN_CAP = 50e-15
+        MAX_RES = 100000.0
+        MIN_RES = 10.0
+        history = []
 
-    # 5. NEWTON JUMP WITH DAMPING
-    new_resistor = resistor - (error / slope)
-    
-    # 6. LAYOUT & PHYSICAL CONSTRAINTS
-    if new_resistor > MAX_RES:
-        print("⚠️ R hit 100k. Increasing Cap.")
-        resistor = 50000.0
-        cap *= 2
-    elif new_resistor < MIN_RES:
-        if cap > MIN_CAP:
-            print(f"⚠️ R hit 10Ω. Reducing Cap (Floor: {MIN_CAP*1e15}fF).")
-            resistor = 500.0
-            cap = max(MIN_CAP, cap / 2)
-    else:
-        # Standard Step with 0.7 damping for stability
-        resistor = resistor + 0.7 * (new_resistor - resistor)
+        self.status_label.config(text="Optimizing...", foreground="orange")
+        self.stats_text.delete(1.0, tk.END)
+
+        # --- THE OPTIMIZATION LOOP (Moved Inside) ---
+        for attempt in range(50):
+            # 1. LOOP DETECTION
+            state = (round(resistor, 2), round(cap * 1e15, 2))
+            if state in history:
+                self.stats_text.insert(tk.END, "⚠️ Loop detected. Jittering...\n")
+                resistor *= random.uniform(0.8, 1.2)
+                history.clear()
+                continue
+            history.append(state)
+
+            # 2. MEASURE CURRENT STATE
+            run_simulation(resistor, cap)
+            f1 = get_actual_cutoff()
+            error = f1 - TARGET_FREQ
+            
+            # UPDATE GUI VISUALS
+            self.update_plot(resistor, cap, f1, TARGET_FREQ)
+            log_msg = f"Step {attempt}: R={resistor:.1f}Ω | C={cap*1e15:.1f}fF | F={f1/1e9:.2f}G\n"
+            self.stats_text.insert(tk.END, log_msg)
+            self.stats_text.see(tk.END)
+            self.root.update() # IMPORTANT: Keeps GUI responsive!
+
+            if abs(error) <= TOLERANCE:
+                self.status_label.config(text="Success!", foreground="green")
+                self.stats_text.insert(tk.END, f"\n✅ FINAL: R={resistor:.2f}Ω, C={cap*1e15:.2f}fF")
+                break
+
+            # 3. CALCULATE SLOPE
+            nudge = resistor * 0.05 
+            run_simulation(resistor + nudge, cap)
+            f2 = get_actual_cutoff()
+            slope = (f2 - f1) / nudge
+
+            # 4. EMERGENCY SLOPE RECOVERY
+            if abs(slope) < 1e-5:
+                self.stats_text.insert(tk.END, "⚠️ Zero slope. Kicking...\n")
+                if f1 < TARGET_FREQ:
+                    resistor *= 0.5
+                else:
+                    resistor *= 2.0
+                continue
+
+            # 5. NEWTON JUMP
+            new_resistor = resistor - (error / slope)
+            
+            # 6. LAYOUT CONSTRAINTS (Your Specific Logic)
+            if new_resistor > MAX_RES:
+                self.stats_text.insert(tk.END, "⚠️ Hit 100kΩ. Doubling Cap.\n")
+                resistor = 50000.0
+                cap *= 2
+            elif new_resistor < MIN_RES:
+                if cap > MIN_CAP:
+                    self.stats_text.insert(tk.END, "⚠️ Hit 10Ω. Halving Cap.\n")
+                    resistor = 500.0
+                    cap = max(MIN_CAP, cap / 2)
+                else:
+                    self.status_label.config(text="Failed: Physical Limit", foreground="red")
+                    break
+            else:
+                resistor = resistor + 0.7 * (new_resistor - resistor)
+
+# --- START APP ---
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = FilterTunerGUI(root)
+    root.mainloop()

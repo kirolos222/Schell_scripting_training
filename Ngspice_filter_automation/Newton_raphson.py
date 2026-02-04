@@ -10,7 +10,6 @@ import numpy as np
 # --- 1. CORE SIMULATION FUNCTIONS ---
 def run_simulation(r_val, C_VAL):
     spice_path = r"d:\Spice64\bin\ngspice.exe" 
-    
     netlist = f"""
     * Automated Filter Optimization
     V1 in 0 AC 1
@@ -26,7 +25,6 @@ def run_simulation(r_val, C_VAL):
     """
     with open("ac_analysis.cir", "w") as f:
         f.write(netlist)
-    
     subprocess.run([spice_path, "-b", "ac_analysis.cir"], stdout=subprocess.DEVNULL)
 
 def get_actual_cutoff():
@@ -48,32 +46,55 @@ def get_actual_cutoff():
 class FilterTunerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Dual-Parameter RC Optimizer (with Best-Fit Memory)")
+        self.root.title("RC Optimizer Pro: Monte Carlo Edition")
+        
+        # Initialize storage variables to prevent Monte Carlo errors
+        self.best_r = 1000.0
+        self.best_c = 1e-12
         
         self.setup_widgets()
         
         self.fig, self.ax = plt.subplots(figsize=(6, 4))
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas.get_tk_widget().pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-        
+
     def setup_widgets(self):
         control_frame = ttk.Frame(self.root, padding="10")
         control_frame.pack(side=tk.LEFT, fill=tk.Y)
-        
+
+        # Optimization Section
+        ttk.Label(control_frame, text="--- OPTIMIZER ---", font=('Arial', 10, 'bold')).pack()
         ttk.Label(control_frame, text="Target Freq (GHz):").pack()
         self.target_entry = ttk.Entry(control_frame)
         self.target_entry.insert(0, "5")
-        self.target_entry.pack(pady=5)
+        self.target_entry.pack(pady=2)
         
+        # Fixed: Added the missing status_label
         self.status_label = ttk.Label(control_frame, text="Status: Idle", foreground="blue")
-        self.status_label.pack(pady=20)
+        self.status_label.pack(pady=5)
         
-        self.tune_btn = ttk.Button(control_frame, text="Start Auto-Tune", command=self.start_optimization)
-        self.tune_btn.pack(pady=10)
-        
-        self.stats_text = tk.Text(control_frame, height=20, width=45, font=("Consolas", 9))
-        self.stats_text.pack(pady=10)
+        ttk.Button(control_frame, text="Find Best Fit", command=self.start_optimization).pack(pady=5, fill=tk.X)
 
+        # Monte Carlo Section
+        ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=10)
+        ttk.Label(control_frame, text="--- MONTE CARLO ---", font=('Arial', 10, 'bold')).pack()
+        
+        ttk.Label(control_frame, text="Tolerance (%) :").pack()
+        self.tol_entry = ttk.Entry(control_frame)
+        self.tol_entry.insert(0, "5")
+        self.tol_entry.pack(pady=2)
+
+        ttk.Label(control_frame, text="Iterations :").pack()
+        self.mc_iters = ttk.Entry(control_frame)
+        self.mc_iters.insert(0, "20")
+        self.mc_iters.pack(pady=2)
+
+        ttk.Button(control_frame, text="Run Stress Test", command=self.run_monte_carlo).pack(pady=10, fill=tk.X)
+
+        self.stats_text = tk.Text(control_frame, height=15, width=40, font=("Consolas", 9))
+        self.stats_text.pack()
+
+    # Fixed: Added the missing update_plot method
     def update_plot(self, r, c, current_f, target_f):
         self.ax.clear()
         f_range = np.logspace(0, 11, 100)
@@ -103,14 +124,8 @@ class FilterTunerGUI:
         resistor = 1000.0
         cap = 1 / (2 * 3.14 * resistor * TARGET_FREQ)
         
-        # Constraints
-        MIN_CAP = 50e-15
-        MAX_RES = 100000.0
-        MIN_RES = 10.0
-        
-        # --- NEW: BEST-FIT MEMORY TRACKERS ---
+        MIN_CAP, MAX_RES, MIN_RES = 50e-15, 100000.0, 10.0
         best_error = float('inf')
-        best_r, best_c, best_f = 0, 0, 0
         
         history = []
         fine_tune_turn = "R" 
@@ -131,10 +146,9 @@ class FilterTunerGUI:
             error = f1 - TARGET_FREQ
             abs_error = abs(error)
             
-            # --- TRACK THE BEST RESULT ---
             if abs_error < best_error:
                 best_error = abs_error
-                best_r, best_c, best_f = resistor, cap, f1
+                self.best_r, self.best_c, best_f = resistor, cap, f1 # Saved to self
                 marker = "⭐ [BEST]"
             else:
                 marker = ""
@@ -153,7 +167,6 @@ class FilterTunerGUI:
                 self.status_label.config(text="Success!", foreground="green")
                 break
 
-            # 3. HYBRID LOGIC: DUAL-PARAMETER FINE TUNING
             if in_fine_tune:
                 step_size = 0.005 
                 if fine_tune_turn == "R":
@@ -165,39 +178,59 @@ class FilterTunerGUI:
                     fine_tune_turn = "R" 
                 continue
 
-            # 4. STANDARD NEWTON RAPHSON (Coarse Tuning)
             nudge = resistor * 0.05 
             run_simulation(resistor + nudge, cap)
             f2 = get_actual_cutoff()
             slope = (f2 - f1) / nudge
 
             if abs(slope) < 1e-5:
-                if f1 < TARGET_FREQ: resistor *= 0.5
-                else: resistor *= 2.0
+                resistor *= 0.5 if f1 < TARGET_FREQ else 2.0
                 continue
 
             new_resistor = resistor - (error / slope)
             
-            # 5. LAYOUT CONSTRAINTS
             if new_resistor > MAX_RES:
-                resistor = 50000.0
-                cap *= 2
+                resistor, cap = 50000.0, cap * 2
             elif new_resistor < MIN_RES:
-                if cap > MIN_CAP:
-                    resistor = 500.0
-                    cap = max(MIN_CAP, cap / 2)
+                resistor, cap = 500.0, max(MIN_CAP, cap / 2)
             else:
                 resistor = resistor + 0.7 * (new_resistor - resistor)
 
-        # --- FINAL OUTPUT OF BEST SAVED STATE ---
-        self.stats_text.insert(tk.END, "\n" + "="*35 + "\n")
-        self.stats_text.insert(tk.END, "🏆 OPTIMAL DESIGN SUMMARY:\n")
-        self.stats_text.insert(tk.END, f"Best Resistance:  {best_r:.2f} Ω\n")
-        self.stats_text.insert(tk.END, f"Best Capacitance: {best_c*1e15:.2f} fF\n")
-        self.stats_text.insert(tk.END, f"Best Frequency:   {best_f/1e9:.4f} GHz\n")
-        self.stats_text.insert(tk.END, f"Minimum Error:    {(best_error/TARGET_FREQ)*100:.4f}%\n")
-        self.stats_text.insert(tk.END, "="*35 + "\n")
-        self.stats_text.see(tk.END)
+        self.stats_text.insert(tk.END, f"\n✅ FINAL: R={self.best_r:.2f}Ω, C={self.best_c*1e15:.2f}fF\n")
+
+    def run_monte_carlo(self):
+        try:
+            # Fixed: Use the class variables instead of scraping text
+            r_nom = self.best_r
+            c_nom = self.best_c
+            tol = float(self.tol_entry.get()) / 100
+            iters = int(self.mc_iters.get())
+        except Exception as e:
+            self.stats_text.insert(tk.END, f"\nError: {e}")
+            return
+
+        self.stats_text.insert(tk.END, f"\nStarting Monte Carlo ({iters} runs)...\n")
+        results = []
+        self.ax.clear()
+        f_range = np.logspace(0, 11, 100)
+
+        for i in range(iters):
+            r_var = r_nom * (1 + np.random.normal(0, tol))
+            c_var = c_nom * (1 + np.random.normal(0, tol))
+            
+            run_simulation(r_var, c_var)
+            f_res = get_actual_cutoff()
+            results.append(f_res)
+            
+            gain = 1 / np.sqrt(1 + (2 * np.pi * f_range * r_var * c_var)**2)
+            self.ax.semilogx(f_range, gain, color='gray', alpha=0.3)
+            self.root.update()
+
+        results = np.array(results) / 1e9
+        self.stats_text.insert(tk.END, f"Min: {np.min(results):.3f}G | Max: {np.max(results):.3f}G\n")
+        self.stats_text.insert(tk.END, f"Std Dev: {np.std(results):.4f} GHz\n")
+        self.ax.set_title(f"Monte Carlo Spread ({tol*100}% Tolerance)")
+        self.canvas.draw()
 
 if __name__ == "__main__":
     root = tk.Tk()
